@@ -1,7 +1,7 @@
 package chocopy.pa2;
 
 import chocopy.common.analysis.SymbolTable;
-import chocopy.common.analysis.types.Type;
+import chocopy.common.analysis.types.*;
 import chocopy.common.astnodes.Program;
 
 /** Top-level class for performing semantic analysis. */

@@ -2,15 +2,9 @@ package chocopy.pa2;
 
 import chocopy.common.analysis.AbstractNodeAnalyzer;
 import chocopy.common.analysis.SymbolTable;
-import chocopy.common.analysis.types.Type;
-import chocopy.common.analysis.types.ValueType;
-import chocopy.common.astnodes.Declaration;
-import chocopy.common.astnodes.Errors;
-import chocopy.common.astnodes.Identifier;
-import chocopy.common.astnodes.Program;
-import chocopy.common.astnodes.VarDef;
 import chocopy.common.astnodes.*;
 import chocopy.common.analysis.types.*;
+import chocopy.pa2.types.*;
 import java.util.*;
 
 /**
@@ -30,11 +24,12 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         errors = errors0;
 
         // Keywords that can't be variables
-        sym.put("object",Type.OBJECT_TYPE);
-        sym.put("int",Type.INT_TYPE);
-        sym.put("bool",Type.BOOL_TYPE);
-        sym.put("str",Type.STR_TYPE);
-        sym.put("None",Type.NONE_TYPE);
+        ClassDefType objectDef=new ClassDefType(null);
+        sym.put("object",objectDef);
+        sym.put("int",new ClassDefType(objectDef));
+        sym.put("bool",new ClassDefType(objectDef));
+        sym.put("str",new ClassDefType(objectDef));
+        sym.put("None",new ClassDefType(null));
 
         // Predefined functions
         List<ValueType> printParams=new ArrayList<>();
@@ -53,38 +48,27 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
 
     @Override
     public Type analyze(Program program) {
-        for (Declaration decl : program.declarations) {
-            Identifier id = decl.getIdentifier();
-            String name = id.name;
-
-            Type type = decl.dispatch(this);
-
-            if (type == null) {
-                continue;
-            }
-
-            if (sym.declares(name)) {
-                errors.semError(id,
-                                "Duplicate declaration of identifier in same "
-                                + "scope: %s",
-                                name);
-            } else {
-                sym.put(name, type);
-            }
-        }
-
+        checkAndAddDeclarations(program.declarations);
+        
         return null;
     }
 
     @Override
     public Type analyze(VarDef varDef) {
-        return ValueType.annotationToValueType(varDef.var.type);
+        Type type=ValueType.annotationToValueType(varDef.var.type);
+
+        //Check if name is a class
+        checkShadowDeclaration(varDef);
+
+        return type;
     }
     
     @Override
     public Type analyze(FuncDef funcDef) {
+        // Check if name is a class
+        checkShadowDeclaration(funcDef);
 
-        // Get params and return to create a FuncType
+        // Get params and return type to create a FuncType
         List<ValueType> params=new ArrayList<>();
         for(TypedVar param: funcDef.params){
             params.add(ValueType.annotationToValueType(param.type));
@@ -100,45 +84,11 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         sym=funcScope;
 
         // Add parameters to function scope
-        for(TypedVar param: funcDef.params){
-            Identifier id = param.identifier;
-            String name = id.name;
-            Type type=ValueType.annotationToValueType(param.type);
-
-            if (type == null) {
-                continue;
-            }
-
-            if (sym.declares(name)) {
-                errors.semError(id,
-                                "Duplicate declaration of identifier in same "
-                                + "scope: %s",
-                                name);
-            } else {
-                sym.put(name, type);
-            }
-        }
+        checkAndAddParams(funcDef.params);
 
         // Check function declarations for errors
-        for (Declaration decl : funcDef.declarations) {
-            Identifier id = decl.getIdentifier();
-            String name = id.name;
-
-            Type type = decl.dispatch(this);
-
-            if (type == null) {
-                continue;
-            }
-
-            if (sym.declares(name)) {
-                errors.semError(id,
-                                "Duplicate declaration of identifier in same "
-                                + "scope: %s",
-                                name);
-            } else {
-                sym.put(name, type);
-            }
-        }
+        checkAndAddDeclarations(funcDef.declarations);
+        
         // Go back to original scope
         sym=oldSym;
         // Return function type
@@ -147,9 +97,26 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
 
     @Override
     public Type analyze(ClassDef classDef) {
+        Identifier classId=classDef.getIdentifier();
+        String superClassName=classDef.superClass.name;
+        Type superClassType=globals.get(superClassName);
+        ClassDefType classType=new ClassDefType(null);
+        //Check if super class exists
+        if(!globals.declares(superClassName)){
+            errors.semError(classId,
+                                "Super-class not defined: %s",
+                                superClassName);
+        }
+        if(!(superClassType instanceof ClassDefType)){
+            errors.semError(classId,
+                                "Super-class must be a class: %s",
+                                superClassName);
+        }
+        else{
+            classType=new ClassDefType((ClassDefType)superClassType);
+        }
 
-        // Create ClassValueType
-        ClassValueType classType=new ClassValueType(classDef.getIdentifier().name);
+        
 
         // Create the function scope
         SymbolTable<Type> classScope = new SymbolTable<>(sym);
@@ -157,25 +124,8 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         sym=classScope;
 
         // Check function declarations for errors
-        for (Declaration decl : classDef.declarations) {
-            Identifier id = decl.getIdentifier();
-            String name = id.name;
-
-            Type type = decl.dispatch(this);
-
-            if (type == null) {
-                continue;
-            }
-
-            if (sym.declares(name)) {
-                errors.semError(id,
-                                "Duplicate declaration of identifier in same "
-                                + "scope: %s",
-                                name);
-            } else {
-                sym.put(name, type);
-            }
-        }
+        checkAndAddDeclarations(classDef.declarations);
+        
         // Go back to original scope
         sym=oldSym;
         // Return function type
@@ -202,8 +152,8 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
             return null;
         }
 
-        // The name is not a variable in global
-        if((globals.get(name) instanceof ClassValueType) || (globals.get(name) instanceof FuncType)){
+        // The name is a class or function in global, then error
+        if((globals.get(name) instanceof ClassDefType) || (globals.get(name) instanceof FuncType)){
             errors.semError(id,
                                 "Not a global variable: %s",
                                 name);
@@ -238,7 +188,7 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
             }
             parentTable=parentTable.getParent();
         }
-        if(type==null || (type instanceof ClassValueType) || (type instanceof FuncType)){
+        if(type==null || (type instanceof ClassDefType) || (type instanceof FuncType)){
             errors.semError(id,
                                 "Not a nonlocal variable: %s",
                                 name);
@@ -246,6 +196,65 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         }
         sym.put(name, type);
         return null;
+    }
+
+    public void checkAndAddDeclarations(List<Declaration> declarations){
+        for (Declaration decl : declarations) {
+            Identifier id = decl.getIdentifier();
+            String name = id.name;
+
+            Type type = decl.dispatch(this);
+
+            if (type == null) {
+                continue;
+            }
+
+            if (sym.declares(name)) {
+                errors.semError(id,
+                                "Duplicate declaration of identifier in same "
+                                + "scope: %s",
+                                name);
+            } else {
+                sym.put(name, type);
+            }
+        }
+    }
+
+    public void checkShadowDeclaration(Declaration decl){
+        Identifier id=decl.getIdentifier();
+        String name=id.name;
+        if(globals.declares(name) && (globals.get(name) instanceof ClassDefType)){
+            errors.semError(id,
+                                "Cannot shadow class name: %s",
+                                name);
+        }
+    }
+
+    public void checkAndAddParams(List<TypedVar> params){
+        for(TypedVar param: params){
+            Identifier id = param.identifier;
+            String name = id.name;
+            Type type=ValueType.annotationToValueType(param.type);
+
+            if (type == null) {
+                continue;
+            }
+
+            if (sym.declares(name)) {
+                errors.semError(id,
+                                "Duplicate declaration of identifier in same "
+                                + "scope: %s",
+                                name);
+            } 
+            else if(globals.declares(name) && (globals.get(name) instanceof ClassDefType)){
+                errors.semError(id,
+                                    "Cannot shadow class name: %s",
+                                    name);
+            }
+            else {
+                sym.put(name, type);
+            }
+        }
     }
 
 }
