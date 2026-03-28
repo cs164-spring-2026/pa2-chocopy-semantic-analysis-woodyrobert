@@ -54,8 +54,8 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
 
     @Override
     public Type analyze(FuncDef funcDef) {
-
-        
+        Identifier id=funcDef.getIdentifier();
+        String name=id.name;
 
         // Create the function scope
         SymbolTable<Type> funcScope = new SymbolTable<>(sym);
@@ -67,7 +67,14 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
 
         // Check function declarations for errors
         checkAndAddDeclarations(funcDef.declarations);
-        
+        if(!containsReturn(funcDef.statements)){
+            errors.semError(id,
+                                "All paths in this function/method must have a return statement: %s",
+                                name);
+        }
+        for (Stmt stmt : funcDef.statements) {
+            stmt.dispatch(this);
+        }
         // Go back to original scope
         sym=oldSym;
         // Get return type to create a FuncType
@@ -98,6 +105,35 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
     @Override
     public Type analyze(ExprStmt s) {
         s.expr.dispatch(this);
+        return null;
+    }
+
+    @Override
+    public Type analyze(AssignStmt s) {
+        for(Expr e: s.targets){
+            Type baseType=e.dispatch(this);
+
+            if (e instanceof Identifier) {
+                String name = ((Identifier) e).name;
+                if (!sym.declares(name)) {
+                    errors.semError(e,
+                                "Cannot assign to variable that is not explicitly declared in this scope: %s",
+                                name);
+                    
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    @Override
+    public Type analyze(ReturnStmt s){
+        if (sym.getParent()==null) {
+                    errors.semError(s,
+                                "Return statement cannot appear at the top level");
+                    
+                }
         return null;
     }
 
@@ -235,7 +271,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
 
     // Utility Functions
 
-    public void checkAndAddDeclarations(List<Declaration> declarations){
+    private void checkAndAddDeclarations(List<Declaration> declarations){
         
         boolean isClass=inClassName!=null;
         for (Declaration decl : declarations) {
@@ -288,7 +324,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         }
     }
 
-    public boolean methodOverrideCheck(String name, ClassDefType parentClassDefType,FuncType funcType){
+    private boolean methodOverrideCheck(String name, ClassDefType parentClassDefType,FuncType funcType){
         SymbolTable<Type> scope=parentClassDefType.scope;
         if(scope!=null && scope.get(name)!=null){
             FuncType overriddenFuncType=(FuncType)scope.get(name); //This can be converted because all other types are founded in error check 
@@ -307,7 +343,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         return false;
     }
 
-    public boolean superClassScopeAttrCollide(String name, ClassDefType parentClassDefType, Type declType){
+    private boolean superClassScopeAttrCollide(String name, ClassDefType parentClassDefType, Type declType){
         
         SymbolTable<Type> scope=parentClassDefType.scope;
         if(scope!=null && scope.get(name)!=null && (scope.get(name) instanceof ValueType || declType instanceof ClassValueType)){
@@ -316,7 +352,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         return false;
     }
 
-    public boolean methodParamCheck(FuncType funcType){
+    private boolean methodParamCheck(FuncType funcType){
         List<ValueType> params=funcType.parameters;
         if (params.isEmpty() 
             || !(params.get(0) instanceof ClassValueType) 
@@ -326,7 +362,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         return false;
     }
 
-    public List<ValueType> checkAndAddParams(List<TypedVar> params){
+    private List<ValueType> checkAndAddParams(List<TypedVar> params){
         List<ValueType> returnParams=new ArrayList<>();
         for(TypedVar param: params){
             Identifier id = param.identifier;
@@ -354,5 +390,28 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
             
         }
         return returnParams;
+    }
+
+    public boolean containsReturn(List<Stmt> stmts){
+        for(Stmt s: stmts){
+            if(guaranteesReturn(s)){
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean guaranteesReturn(Stmt s){
+        if(s instanceof ReturnStmt){
+            return true;
+        }
+        if(s instanceof IfStmt){
+            IfStmt ifs=((IfStmt)s);
+            if(ifs.elseBody.isEmpty()){
+                return false;
+            }    
+            return containsReturn(ifs.thenBody) && containsReturn(ifs.elseBody);
+        }
+        return false;
     }
 }
