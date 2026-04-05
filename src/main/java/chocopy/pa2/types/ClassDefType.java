@@ -13,14 +13,16 @@ public class ClassDefType extends Type {
     /** Class's super class type. */
     public final ClassDefType superType;
     public final SymbolTable scope;
+    public final String name;
 
     /** Create a ClassType returning superType0. */
-    public ClassDefType(ClassDefType superType0,SymbolTable<Type> scope) {
+    public ClassDefType(ClassDefType superType0,SymbolTable<Type> scope, String name) {
         this.superType=superType0;
         this.scope=scope;
+        this.name = name;
     }
-    public ClassDefType(ClassDefType superType0) {
-        this(superType0,null);
+    public ClassDefType(ClassDefType superType0, String name) {
+        this(superType0,null,name);
     }
 
 

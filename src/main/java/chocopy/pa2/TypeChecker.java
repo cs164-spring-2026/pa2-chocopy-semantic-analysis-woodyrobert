@@ -3,13 +3,22 @@ package chocopy.pa2;
 import chocopy.common.analysis.AbstractNodeAnalyzer;
 import chocopy.common.analysis.SymbolTable;
 
-
+import static chocopy.common.analysis.types.Type.BOOL_TYPE;
+import static chocopy.common.analysis.types.Type.EMPTY_TYPE;
 import static chocopy.common.analysis.types.Type.INT_TYPE;
+import static chocopy.common.analysis.types.Type.NONE_TYPE;
 import static chocopy.common.analysis.types.Type.OBJECT_TYPE;
+import static chocopy.common.analysis.types.Type.STR_TYPE;
+
 import chocopy.common.analysis.types.*;
 import chocopy.common.astnodes.*;
 import chocopy.pa2.types.*;
+import java_cup.runtime.Symbol;
+import proguard.classfile.attribute.preverification.ObjectType;
+
 import java.util.*;
+
+import javax.swing.text.html.parser.Element;
 
 
 /** Analyzer that performs ChocoPy type checks on all nodes.  Applied after
@@ -21,6 +30,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
     private SymbolTable<Type> sym;
     private final SymbolTable<Type> globals;
     private String inClassName;
+    private ValueType returnType;
     /** Collector for errors. */
     private Errors errors;
 
@@ -29,6 +39,7 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
      *  symbol table and ERRORS0 to receive semantic errors. */
     public TypeChecker(SymbolTable<Type> globalSymbols, Errors errors0) {
         inClassName=null;
+        returnType=null;
         globals=globalSymbols;
         sym = globalSymbols;
         errors = errors0;
@@ -61,26 +72,37 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         SymbolTable<Type> funcScope = new SymbolTable<>(sym);
         SymbolTable<Type> oldSym=sym;
         sym=funcScope;
+        returnType=(ValueType)funcDef.returnType.dispatch(this);
 
         // Add to function scope and get params for FuncType
         List<ValueType> params=checkAndAddParams(funcDef.params);
-
+        
         // Check function declarations for errors
         checkAndAddDeclarations(funcDef.declarations);
-        if(!containsReturn(funcDef.statements)){
-            errors.semError(id,
-                                "All paths in this function/method must have a return statement: %s",
-                                name);
-        }
+        
         for (Stmt stmt : funcDef.statements) {
             stmt.dispatch(this);
         }
         // Go back to original scope
         sym=oldSym;
-        // Get return type to create a FuncType
-        ValueType returnType=(ValueType)funcDef.returnType.dispatch(this);
-
-        FuncType funcType=new FuncType(params,returnType);
+        returnType=null;
+        ValueType returnValType = (ValueType)funcDef.returnType.dispatch(this);
+        if(inClassName!= null && name.equals("__init__")){
+            // if(!returnType.className().equals("<None>")){
+            //     errors.semError(id,
+            //         "Expected type `<None>`; got type `%s`", returnType);
+            // }
+            if(!(params.size() == 1 && funcDef.params.get(0).identifier.name.equals("self"))){
+                errors.semError(id,
+                    "Method overridden with different type signature: __init__");
+            }
+        }
+        if(!containsReturn(funcDef.statements) && !returnValType.className().equals("<None>")){
+            errors.semError(id,
+                                "All paths in this function/method must have a return statement: %s",
+                                name);
+        }
+        FuncType funcType=new FuncType(params,returnValType);
         // Return function type
         return funcType;
     }
@@ -95,6 +117,11 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         inClassName=classDef.getIdentifier().name;
         // Check function declarations for errors
         checkAndAddDeclarations(classDef.declarations);
+        if(!classScope.declares("__init__")){
+            ArrayList<ValueType> parameters = new ArrayList<ValueType>();
+            parameters.add(new ClassValueType(classDef.getIdentifier().name));
+            classScope.put("__init__", new FuncType(parameters, NONE_TYPE));
+        }
         inClassName=null;
         // Go back to original scope
         sym=oldSym;
@@ -110,20 +137,146 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
 
     @Override
     public Type analyze(AssignStmt s) {
+        // if(s.value == null)
+        //     return null;
+        Type outputValTypeProbably = (s.value).dispatch(this);
+        Boolean checked = false;
         for(Expr e: s.targets){
             Type baseType=e.dispatch(this);
-
             if (e instanceof Identifier) {
                 String name = ((Identifier) e).name;
-                if (!sym.declares(name)) {
+                if (!sym.declares(name) && sym.get(name) != null) {
                     errors.semError(e,
                                 "Cannot assign to variable that is not explicitly declared in this scope: %s",
                                 name);
                     
                 }
+                if(!baseType.equals(outputValTypeProbably) && !checked){
+                    errors.semError(s,
+                        "Expected type `%s`; got type `%s`",
+                        baseType, outputValTypeProbably);
+                    checked = true;
+                }
             }
         }
-        
+        return null;
+    }
+    @Override
+    public Type analyze(ListExpr L){
+        if(L.elements.isEmpty()){
+            return L.setInferredType(EMPTY_TYPE);
+        }
+
+        return LUB(L.elements);
+    }
+
+    public Type LUB(List<Expr> elements){
+        Type currType = null;
+        for(Expr e : elements){
+            Type tempType = e.dispatch(this);
+            if(tempType instanceof ListValueType){
+                return OBJECT_TYPE;
+            }
+            if(currType == null){
+                currType = tempType;
+                continue;
+            }
+            if(tempType.className().equals(currType.className())){
+                continue;
+            }else{
+                ClassDefType baseType = (ClassDefType)globals.get(tempType.className());
+                ClassDefType baseCurrType = (ClassDefType)globals.get(currType.className());
+                while(!baseType.name.equals(baseCurrType.name)){
+                    if(baseType.superType == null){
+                        baseCurrType = baseCurrType.superType;
+                        baseType = (ClassDefType)globals.get(tempType.className());
+                    }else{
+                        baseType = baseType.superType;
+                    }
+                }
+                currType = new ClassValueType(baseCurrType.name);
+            }
+        }
+        return currType;
+    }
+    @Override
+    public Type analyze(CallExpr c){
+        FuncType f = null;
+        if(sym.get(c.function.name) instanceof FuncType){
+            f = (FuncType)sym.get(c.function.name);
+        }else if (sym.get(c.function.name) instanceof ClassDefType){
+            ClassDefType tempCDType = (ClassDefType)sym.get(c.function.name);
+            SymbolTable<Type> tempScope = tempCDType.scope;
+            f = (FuncType)tempScope.get("__init__");
+        }
+        else{
+            return null;
+        }
+        if(c.args.size() == f.parameters.size()){
+            for(int i = 0; i < c.args.size(); i++){
+                Type cType = c.args.get(i).dispatch(this);
+                Type fType = f.parameters.get(i);
+                if(!cType.toString().equals(fType.toString())){
+                    errors.semError(c,
+                        "Expected type `%s`; got type `%s` in parameter %d", fType.toString(), cType.toString(),i);
+                }
+            }
+        }else{
+            errors.semError(c,
+                "Expected %d arguments; got %d",
+                f.parameters.size(),c.args.size());
+        }
+        return f.returnType;
+    }
+    @Override
+    public Type analyze(MethodCallExpr c){
+        FuncType f = (FuncType)c.method.dispatch(this);
+        if(f==null){
+            return OBJECT_TYPE;
+        }
+        if(c.args.size() == f.parameters.size()){
+            for(int i = 0; i < c.args.size(); i++){
+                Type cType = c.args.get(i).dispatch(this);
+                Type fType = f.parameters.get(i);
+                if(!cType.toString().equals(fType.toString())){
+                    errors.semError(c,
+                        "Expected type `%s`; got type `%s` in parameter %d", fType.toString(), cType.toString(),i);
+                }
+            }
+        }else{
+            errors.semError(c,
+                "Expected %d arguments; got %d",
+                f.parameters.size(),c.args.size());
+        }
+        return f.returnType;
+    }
+    
+    @Override
+    public Type analyze(MemberExpr m){
+        Type t = m.object.dispatch(this);
+        ClassDefType cdType = null;
+        String cname = "";
+        if(t instanceof ClassValueType){
+            cname= ((ClassValueType)t).className();
+            cdType = (ClassDefType)(globals.get(cname));
+        }
+        SymbolTable<Type> classScope = cdType.scope;
+        if(classScope == null){
+                errors.semError(m,
+                    "There is no attribute named `%s` in class `%s`", m.member.name, cdType.name
+                );
+        }else{
+            Type mType = classScope.get(m.member.name);
+            if(mType==null){
+                errors.semError(m,
+                    "There is no attribute named `%s` in class `%s`", m.member.name, cdType.name
+                );
+                
+            }
+            return mType;
+
+        }
+
         return null;
     }
 
@@ -132,8 +285,22 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
         if (sym.getParent()==null) {
                     errors.semError(s,
                                 "Return statement cannot appear at the top level");
-                    
+                                return null;
                 }
+        if(returnType!=null){
+            if(s.value == null && !returnType.className().equals("<None>")){
+                errors.semError(s,
+                    "Expected type `%s`; got type `<None>`", returnType);
+            }
+            else
+            { 
+                ValueType temp = (ValueType)s.value.dispatch(this);
+                if(!temp.toString().equals(returnType.className())){
+                    errors.semError(s,
+                        "Expected type `%s`; got type `%s`", returnType, temp);
+                }
+            }
+        }
         return null;
     }
 
@@ -141,16 +308,59 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
     public Type analyze(IntegerLiteral i) {
         return i.setInferredType(Type.INT_TYPE);
     }
-
+    @Override
+    public Type analyze(BooleanLiteral i) {
+        return i.setInferredType(Type.BOOL_TYPE);
+    }
+    @Override
+    public Type analyze(StringLiteral i) {
+        return i.setInferredType(Type.STR_TYPE);
+    }
+    @Override
+    public Type analyze(NoneLiteral i) {
+        return i.setInferredType(Type.NONE_TYPE);
+    }
     @Override
     public Type analyze(BinaryExpr e) {
         Type t1 = e.left.dispatch(this);
         Type t2 = e.right.dispatch(this);
 
         switch (e.operator) {
+        case "+":
+            if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(INT_TYPE);
+            } else if (STR_TYPE.equals(t1) && STR_TYPE.equals(t2)) {
+                return e.setInferredType(STR_TYPE);
+            }
+            else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(INT_TYPE);
+            }
         case "-":
+            if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(INT_TYPE);
+            } else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(INT_TYPE);
+            }
         case "*":
+            if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(INT_TYPE);
+            } else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(INT_TYPE);
+            }
         case "//":
+            if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(INT_TYPE);
+            } else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(INT_TYPE);
+            }
         case "%":
             if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
                 return e.setInferredType(INT_TYPE);
@@ -158,6 +368,51 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
                 err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
                     e.operator, t1, t2);
                 return e.setInferredType(INT_TYPE);
+            }
+        case "==":
+        case "!=":
+            if (BOOL_TYPE.equals(t1) && BOOL_TYPE.equals(t2)) {
+                return e.setInferredType(BOOL_TYPE);
+            }
+            else if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(BOOL_TYPE);
+            } else if (STR_TYPE.equals(t1) && STR_TYPE.equals(t2)) {
+                return e.setInferredType(BOOL_TYPE);
+            }
+            else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(BOOL_TYPE);
+            }
+        case "and":
+        case "or":
+            if (BOOL_TYPE.equals(t1) && BOOL_TYPE.equals(t2)) {
+                return e.setInferredType(BOOL_TYPE);
+            }
+            else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(BOOL_TYPE);
+            }
+        case "is":
+            if (!t1.isSpecialType() && !t2.isSpecialType()) {
+                return e.setInferredType(BOOL_TYPE);
+            }
+            else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(BOOL_TYPE);
+            }
+        case "<=":
+        case "<":
+        case ">":
+        case ">=":
+            if (INT_TYPE.equals(t1) && INT_TYPE.equals(t2)) {
+                return e.setInferredType(BOOL_TYPE);
+            } else {
+                err(e, "Cannot apply operator `%s` on types `%s` and `%s`",
+                    e.operator, t1, t2);
+                return e.setInferredType(BOOL_TYPE);
             }
         default:
             return e.setInferredType(OBJECT_TYPE);
@@ -202,9 +457,16 @@ public class TypeChecker extends AbstractNodeAnalyzer<Type> {
     }
     @Override
     public Type analyze(VarDef varDef) {
-        Type type=varDef.var.dispatch(this);
-
-        return type;
+        Type varType=varDef.var.dispatch(this);
+        Type valType=varDef.value.dispatch(this);
+        
+        if(!varType.toString().equals(valType.toString())){
+            errors.semError(varDef,
+                "Expected type `%s`; got type `%s`",
+                varType, valType);
+            return null;
+        }
+        return varType;
     }
 
     @Override

@@ -24,12 +24,12 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         errors = errors0;
 
         // Keywords that can't be variables
-        ClassDefType objectDef=new ClassDefType(null);
+        ClassDefType objectDef=new ClassDefType(null, "");
         sym.put("object",objectDef);
-        sym.put("int",new SpecialClassDefType(objectDef));
-        sym.put("bool",new SpecialClassDefType(objectDef));
-        sym.put("str",new SpecialClassDefType(objectDef));
-        sym.put("None",new SpecialClassDefType(null));
+        sym.put("int",new SpecialClassDefType(objectDef, ""));
+        sym.put("bool",new SpecialClassDefType(objectDef, ""));
+        sym.put("str",new SpecialClassDefType(objectDef, ""));
+        sym.put("<None>",new SpecialClassDefType(null, ""));
 
         // Predefined functions
         List<ValueType> printParams=new ArrayList<>();
@@ -101,7 +101,7 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
         Identifier superClassId=classDef.superClass;
         String superClassName=superClassId.name;
         Type superClassType=globals.get(superClassName);
-        ClassDefType classType=new ClassDefType(null);
+        ClassDefType classType=new ClassDefType(null,"");
         //Check if super class exists
         if(!globals.declares(superClassName)){
             errors.semError(superClassId,
@@ -119,7 +119,7 @@ public class DeclarationAnalyzer extends AbstractNodeAnalyzer<Type> {
                                 superClassName);
         }
         else{
-            classType=new ClassDefType((ClassDefType)superClassType,new SymbolTable<Type>(sym));
+            classType=new ClassDefType((ClassDefType)superClassType,new SymbolTable<Type>(((ClassDefType)superClassType).scope),classId.name);
         }
         
 

@@ -10,8 +10,8 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 public class SpecialClassDefType extends ClassDefType {
 
 
-    public SpecialClassDefType(ClassDefType superType0) {
-        super(superType0);
+    public SpecialClassDefType(ClassDefType superType0, String name){
+        super(superType0, name);
     }
 
 
